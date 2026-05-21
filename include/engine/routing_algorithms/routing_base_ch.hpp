@@ -6,6 +6,7 @@
 #include "engine/routing_algorithms/routing_base.hpp"
 #include "engine/search_engine_data.hpp"
 
+#include "util/exception.hpp"
 #include "util/typedefs.hpp"
 
 #include <boost/assert.hpp>
@@ -230,8 +231,12 @@ std::tuple<EdgeWeight, EdgeDistance> getLoopWeight(const DataFacade<Algorithm> &
  * @param callback void(const std::pair<NodeID, NodeID>, const EdgeID &) called for each
  * original edge found.
  */
-template <typename BidirectionalIterator, typename Callback>
-void unpackPath(const DataFacade<Algorithm> &facade,
+// Templated on FacadeT (rather than DataFacade<Algorithm> concretely) to mirror
+// MLD's unpackPath in routing_base_mld.hpp and to enable unit-testing with the
+// MockDataFacade<CH>.  All existing production callsites pass DataFacade<ch::Algorithm>
+// so behaviour is unchanged.
+template <typename FacadeT, typename BidirectionalIterator, typename Callback>
+void unpackPath(const FacadeT &facade,
                 BidirectionalIterator packed_path_begin,
                 BidirectionalIterator packed_path_end,
                 Callback &&callback)
@@ -268,13 +273,25 @@ void unpackPath(const DataFacade<Algorithm> &facade,
                 edge.second, edge.first, [](const auto &data) { return data.backward; });
         }
 
-        // If we didn't find anything *still*, then something is broken and someone has
-        // called this function with bad values.
-        BOOST_ASSERT_MSG(smaller_edge_id != SPECIAL_EDGEID, "Invalid smaller edge ID");
+        // If we didn't find anything *still*, the CH graph data is corrupt or the
+        // packed path references an edge that doesn't exist.  Throw rather than
+        // dereferencing SPECIAL_EDGEID via GetEdgeData below — that would index
+        // EdgeData with a sentinel value (typically UINT_MAX) and segfault the
+        // process in release builds where BOOST_ASSERT_MSG is compiled out.
+        // The exception propagates up through engine code to the Node binding's
+        // per-request catch (node_osrm.cpp), where it becomes a JS-side error.
+        if (smaller_edge_id == SPECIAL_EDGEID)
+        {
+            throw util::exception(
+                "Invalid edge ID encountered during CH path unpacking — graph data is likely corrupt");
+        }
 
         const auto &data = facade.GetEdgeData(smaller_edge_id);
-        BOOST_ASSERT_MSG(data.weight != std::numeric_limits<EdgeWeight>::max(),
-                         "edge weight invalid");
+        if (data.weight == std::numeric_limits<EdgeWeight>::max())
+        {
+            throw util::exception(
+                "Invalid edge weight encountered during CH path unpacking — graph data is likely corrupt");
+        }
 
         // If the edge is a shortcut, we need to add the two halfs to the stack.
         if (data.shortcut)
@@ -342,13 +359,21 @@ EdgeDistance calculateEBGNodeAnnotations(const DataFacade<Algorithm> &facade,
                                             [](const auto &data) { return data.backward; });
             }
 
-            // If we didn't find anything *still*, then something is broken and someone has
-            // called this function with bad values.
-            BOOST_ASSERT_MSG(smaller_edge_id != SPECIAL_EDGEID, "Invalid smaller edge ID");
+            // If we didn't find anything *still*, the CH graph is corrupt.  Throw
+            // rather than dereferencing SPECIAL_EDGEID via GetEdgeData (see the
+            // companion check in unpackPath above for the same rationale).
+            if (smaller_edge_id == SPECIAL_EDGEID)
+            {
+                throw util::exception(
+                    "Invalid edge ID encountered during CH EBG node annotation — graph data is likely corrupt");
+            }
 
             const auto &data = facade.GetEdgeData(smaller_edge_id);
-            BOOST_ASSERT_MSG(data.weight != std::numeric_limits<EdgeWeight>::max(),
-                             "edge weight invalid");
+            if (data.weight == std::numeric_limits<EdgeWeight>::max())
+            {
+                throw util::exception(
+                    "Invalid edge weight encountered during CH EBG node annotation — graph data is likely corrupt");
+            }
 
             // If the edge is a shortcut, we need to add the two halfs to the stack.
             if (data.shortcut)
