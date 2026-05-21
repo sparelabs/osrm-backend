@@ -272,7 +272,7 @@ void unpackPath(const FacadeT &facade,
             (edge.second != SPECIAL_NODEID && edge.second >= num_nodes_for_check))
         {
             throw util::exception(
-                "Invalid node ID in CH packed path — graph data is likely corrupt");
+                "Invalid node ID in CH packed path - graph data is likely corrupt");
         }
 
         // Look for an edge on the forward CH graph (.forward)
@@ -290,7 +290,7 @@ void unpackPath(const FacadeT &facade,
 
         // If we didn't find anything *still*, the CH graph data is corrupt or the
         // packed path references an edge that doesn't exist.  Throw rather than
-        // dereferencing an out-of-range edge ID via GetEdgeData below — that
+        // dereferencing an out-of-range edge ID via GetEdgeData below: that
         // would index EdgeData with garbage (SPECIAL_EDGEID, or just any value
         // past the end of the edge table) and segfault the process in release
         // builds where BOOST_ASSERT_MSG is compiled out.  The exception
@@ -304,14 +304,14 @@ void unpackPath(const FacadeT &facade,
         if (smaller_edge_id == SPECIAL_EDGEID || smaller_edge_id >= facade.GetNumberOfEdges())
         {
             throw util::exception(
-                "Invalid edge ID encountered during CH path unpacking — graph data is likely corrupt");
+                "Invalid edge ID encountered during CH path unpacking - graph data is likely corrupt");
         }
 
         const auto &data = facade.GetEdgeData(smaller_edge_id);
         if (data.weight == std::numeric_limits<EdgeWeight>::max())
         {
             throw util::exception(
-                "Invalid edge weight encountered during CH path unpacking — graph data is likely corrupt");
+                "Invalid edge weight encountered during CH path unpacking - graph data is likely corrupt");
         }
 
         // If the edge is a shortcut, we need to add the two halfs to the stack.
@@ -386,14 +386,14 @@ EdgeDistance calculateEBGNodeAnnotations(const DataFacade<Algorithm> &facade,
             if (smaller_edge_id == SPECIAL_EDGEID || smaller_edge_id >= facade.GetNumberOfEdges())
             {
                 throw util::exception(
-                    "Invalid edge ID encountered during CH EBG node annotation — graph data is likely corrupt");
+                    "Invalid edge ID encountered during CH EBG node annotation - graph data is likely corrupt");
             }
 
             const auto &data = facade.GetEdgeData(smaller_edge_id);
             if (data.weight == std::numeric_limits<EdgeWeight>::max())
             {
                 throw util::exception(
-                    "Invalid edge weight encountered during CH EBG node annotation — graph data is likely corrupt");
+                    "Invalid edge weight encountered during CH EBG node annotation - graph data is likely corrupt");
             }
 
             // If the edge is a shortcut, we need to add the two halfs to the stack.
