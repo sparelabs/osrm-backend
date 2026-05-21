@@ -260,6 +260,21 @@ void unpackPath(const FacadeT &facade,
         edge = recursion_stack.top();
         recursion_stack.pop();
 
+        // Validate node IDs are in range before passing to FindSmallestEdge.
+        // A corrupt CH graph (INC-296) can produce a shortcut whose middle node
+        // ID is past the end of the node table; the shortcut gets pushed back
+        // onto the recursion stack as the `from` of the next iteration, and
+        // FindSmallestEdge then dereferences node arrays with a garbage index
+        // and segfaults.  Catching this here turns the crash into a JS-side
+        // error via the engine's exception path.
+        const auto num_nodes_for_check = facade.GetNumberOfNodes();
+        if ((edge.first != SPECIAL_NODEID && edge.first >= num_nodes_for_check) ||
+            (edge.second != SPECIAL_NODEID && edge.second >= num_nodes_for_check))
+        {
+            throw util::exception(
+                "Invalid node ID in CH packed path — graph data is likely corrupt");
+        }
+
         // Look for an edge on the forward CH graph (.forward)
         EdgeID smaller_edge_id = facade.FindSmallestEdge(
             edge.first, edge.second, [](const auto &data) { return data.forward; });
@@ -275,12 +290,18 @@ void unpackPath(const FacadeT &facade,
 
         // If we didn't find anything *still*, the CH graph data is corrupt or the
         // packed path references an edge that doesn't exist.  Throw rather than
-        // dereferencing SPECIAL_EDGEID via GetEdgeData below — that would index
-        // EdgeData with a sentinel value (typically UINT_MAX) and segfault the
-        // process in release builds where BOOST_ASSERT_MSG is compiled out.
-        // The exception propagates up through engine code to the Node binding's
-        // per-request catch (node_osrm.cpp), where it becomes a JS-side error.
-        if (smaller_edge_id == SPECIAL_EDGEID)
+        // dereferencing an out-of-range edge ID via GetEdgeData below — that
+        // would index EdgeData with garbage (SPECIAL_EDGEID, or just any value
+        // past the end of the edge table) and segfault the process in release
+        // builds where BOOST_ASSERT_MSG is compiled out.  The exception
+        // propagates up through engine code to the Node binding's per-request
+        // catch (node_osrm.cpp), where it becomes a JS-side error.
+        //
+        // Note: the bound-check is broader than `== SPECIAL_EDGEID` because a
+        // corrupted graph (INC-296) can produce a packed-path edge whose
+        // FindSmallestEdge result is a real-looking but out-of-range index,
+        // not the sentinel.  Comparing >= GetNumberOfEdges() catches both.
+        if (smaller_edge_id == SPECIAL_EDGEID || smaller_edge_id >= facade.GetNumberOfEdges())
         {
             throw util::exception(
                 "Invalid edge ID encountered during CH path unpacking — graph data is likely corrupt");
@@ -360,9 +381,9 @@ EdgeDistance calculateEBGNodeAnnotations(const DataFacade<Algorithm> &facade,
             }
 
             // If we didn't find anything *still*, the CH graph is corrupt.  Throw
-            // rather than dereferencing SPECIAL_EDGEID via GetEdgeData (see the
-            // companion check in unpackPath above for the same rationale).
-            if (smaller_edge_id == SPECIAL_EDGEID)
+            // rather than dereferencing an out-of-range edge ID via GetEdgeData
+            // (see the companion check in unpackPath above for the same rationale).
+            if (smaller_edge_id == SPECIAL_EDGEID || smaller_edge_id >= facade.GetNumberOfEdges())
             {
                 throw util::exception(
                     "Invalid edge ID encountered during CH EBG node annotation — graph data is likely corrupt");
