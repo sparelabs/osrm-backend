@@ -23,8 +23,13 @@ namespace ch
 {
 
 // Stalling
-template <bool DIRECTION, typename HeapT>
-bool stallAtNode(const DataFacade<Algorithm> &facade,
+//
+// Templated on FacadeT to enable unit testing with a custom mock facade
+// (see INC-296 V5: unit_tests/engine/routing_base_ch.cpp).  All production
+// callsites pass DataFacade<ch::Algorithm> so type deduction keeps behaviour
+// unchanged.
+template <bool DIRECTION, typename FacadeT, typename HeapT>
+bool stallAtNode(const FacadeT &facade,
                  const typename HeapT::HeapNode &heapNode,
                  const HeapT &query_heap)
 {
@@ -49,8 +54,9 @@ bool stallAtNode(const DataFacade<Algorithm> &facade,
     return false;
 }
 
-template <bool DIRECTION>
-void relaxOutgoingEdges(const DataFacade<Algorithm> &facade,
+// Templated on FacadeT (see INC-296 V5 comment on stallAtNode).
+template <bool DIRECTION, typename FacadeT>
+void relaxOutgoingEdges(const FacadeT &facade,
                         const SearchEngineData<Algorithm>::QueryHeap::HeapNode &heapNode,
                         SearchEngineData<Algorithm>::QueryHeap &heap)
 {
@@ -114,8 +120,9 @@ we need to add an offset to the termination criterion.
 */
 static constexpr bool ENABLE_STALLING = true;
 static constexpr bool DISABLE_STALLING = false;
-template <bool DIRECTION, bool STALLING = ENABLE_STALLING>
-void routingStep(const DataFacade<Algorithm> &facade,
+// Templated on FacadeT (see INC-296 V5 comment on stallAtNode).
+template <bool DIRECTION, bool STALLING = ENABLE_STALLING, typename FacadeT>
+void routingStep(const FacadeT &facade,
                  SearchEngineData<Algorithm>::QueryHeap &forward_heap,
                  SearchEngineData<Algorithm>::QueryHeap &reverse_heap,
                  NodeID &middle_node_id,
@@ -186,8 +193,9 @@ void routingStep(const DataFacade<Algorithm> &facade,
     relaxOutgoingEdges<DIRECTION>(facade, heapNode, forward_heap);
 }
 
-template <bool UseDuration>
-std::tuple<EdgeWeight, EdgeDistance> getLoopWeight(const DataFacade<Algorithm> &facade, NodeID node)
+// Templated on FacadeT (see INC-296 V5 comment on stallAtNode).
+template <bool UseDuration, typename FacadeT>
+std::tuple<EdgeWeight, EdgeDistance> getLoopWeight(const FacadeT &facade, NodeID node)
 {
     EdgeWeight loop_weight = UseDuration ? MAXIMAL_EDGE_DURATION : INVALID_EDGE_WEIGHT;
     EdgeDistance loop_distance = MAXIMAL_EDGE_DISTANCE;
