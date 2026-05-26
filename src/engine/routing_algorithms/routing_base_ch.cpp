@@ -183,14 +183,24 @@ double getNetworkDistance(SearchEngineData<Algorithm> &engine_working_data,
 
     EdgeWeight weight = INVALID_EDGE_WEIGHT;
     std::vector<NodeID> packed_path;
+
+    const std::vector<NodeID> force_loop_forward =
+        requiresForwardLoop(source_phantom, target_phantom)
+            ? std::vector<NodeID>{source_phantom.forward_segment_id.id}
+            : std::vector<NodeID>{};
+    const std::vector<NodeID> force_loop_reverse =
+        requiresBackwardLoop(source_phantom, target_phantom)
+            ? std::vector<NodeID>{source_phantom.reverse_segment_id.id}
+            : std::vector<NodeID>{};
+
     search(engine_working_data,
            facade,
            forward_heap,
            reverse_heap,
            weight,
            packed_path,
-           {},
-           {},
+           force_loop_forward,
+           force_loop_reverse,
            endpoints,
            weight_upper_bound);
 

@@ -140,10 +140,7 @@ void routingStep(const FacadeT &facade,
         if (new_weight < upper_bound)
         {
             if (force_loop(force_loop_forward_nodes, heapNode) ||
-                force_loop(force_loop_reverse_nodes, heapNode) ||
-                // in this case we are looking at a bi-directional way where the source
-                // and target phantom are on the same edge based node
-                new_weight < 0)
+                force_loop(force_loop_reverse_nodes, heapNode))
             {
                 // check whether there is a loop present at the node
                 for (const auto edge : facade.GetAdjacentEdgeRange(heapNode.node))
@@ -165,10 +162,10 @@ void routingStep(const FacadeT &facade,
                     }
                 }
             }
-            else
+            else if (new_weight >= 0)
             {
-                BOOST_ASSERT(new_weight >= 0);
-
+                // Negative new_weight without a force-loop signal means a heap
+                // offset hasn't paid down yet; skip and keep exploring.
                 middle_node_id = heapNode.node;
                 upper_bound = new_weight;
             }

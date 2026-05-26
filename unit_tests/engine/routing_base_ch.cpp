@@ -244,19 +244,20 @@ BOOST_AUTO_TEST_SUITE_END()
 //     so going to the dead-end and coming back is a valid -- if useless --
 //     path through C).
 //
-// Expected pre-fix outcome: at node C the search sees
+// At node C the search sees
 // forward_heap.GetKey(C) + reverse_heap.GetKey(C) = (-700+50) + 50 = -600.
-// `routingStep`'s self-loop branch fires on `new_weight < 0` alone (the
-// branch's stated intent is "source and target on the same edge based node"
-// but the code does NOT check that), finds the self-loop edge with
-// loop_weight = -600 + 1000 = 400, and sets middle_node_id = C with
-// upper_bound = 400.  This is the algorithm spuriously selecting the self-
-// loop shortcut as the answer, exactly as observed against the production
-// Winnipeg .osrm at Osama's coords.
 //
-// Post-fix (Spec 3): the self-loop branch is gated on force_loop_*_nodes
-// only -- `new_weight < 0` no longer enters the branch.  This test will
-// need an updated expectation when the fix lands.
+// Pre-fix outcome (the bug): `routingStep`'s self-loop branch fired on
+// `new_weight < 0` alone, found the self-loop edge at C with loop_weight =
+// -600 + 1000 = 400, and set middle_node_id = C with upper_bound = 400.
+// The resulting packed_leg = [C, C] unpacked to a closed loop whose
+// endpoints did not match either phantom, segfaulting downstream.
+//
+// Post-fix outcome: with `new_weight < 0` removed from the self-loop branch
+// condition and no force-loop signal set by the caller, the algorithm
+// falls into `else if (new_weight >= 0)` -- which doesn't execute here
+// (-600 < 0).  middle stays SPECIAL_NODEID and the search keeps exploring.
+// This test asserts the post-fix behavior.
 
 BOOST_AUTO_TEST_SUITE(routing_base_ch_search_self_loop_INC296)
 
@@ -351,7 +352,7 @@ class MinimalCHFacade
 
 } // namespace
 
-BOOST_AUTO_TEST_CASE(routingStep_picks_self_loop_when_new_weight_negative_INC296)
+BOOST_AUTO_TEST_CASE(routingStep_does_not_pick_self_loop_when_new_weight_negative_INC296)
 {
     using namespace osrm;
     using namespace osrm::engine;
@@ -404,34 +405,172 @@ BOOST_AUTO_TEST_CASE(routingStep_picks_self_loop_when_new_weight_negative_INC296
     // Step 3: forward.  Pops node 1 (C) with weight -650.  Reverse heap HAS 1
     // with weight 50.  new_weight = -650 + 50 = -600.
     //
-    // This is the bug-triggering moment.  In the pre-fix code, the self-loop
-    // branch is entered because new_weight < 0.  The branch finds the self-
-    // loop edge at C with weight 1000, computes loop_weight = -600 + 1000 =
-    // 400, and sets middle = 1, upper_bound = 400.
+    // Pre-fix this entered the self-loop branch and locked onto C.  Post-fix
+    // the self-loop branch only fires when force_loop_*_nodes signal it (it
+    // doesn't here -- no_force_loop), and the else-if (new_weight >= 0)
+    // doesn't execute because -600 < 0.  So middle stays SPECIAL_NODEID and
+    // the search continues exploring on subsequent steps.
     ch::routingStep<FORWARD_DIRECTION, ch::DISABLE_STALLING>(
         facade, forward_heap, reverse_heap, middle, upper_bound, min_edge_offset,
         no_force_loop, no_force_loop);
 
-    BOOST_CHECK_EQUAL(middle, NodeID{1});
-    BOOST_CHECK_EQUAL(upper_bound, 400);
-
-    // CRITICAL ASSERTION: `middle` is C=1, which is neither the source phantom
-    // (S=0) nor the target phantom (T=2).  This is the bug: the algorithm has
-    // picked an internal node with a self-loop shortcut as the meeting point,
-    // and the resulting packed_leg will be [1, 1] -- a closed loop that
-    // doesn't connect S and T at all.  In the production INC-296 case this
-    // packed_leg unpacked to a 5-node closed loop and the downstream
-    // endpointsFromCandidates assertion fired because path.front() didn't
-    // match the source phantom's forward_segment_id.
-    BOOST_CHECK(middle != NodeID{0});  // not source
-    BOOST_CHECK(middle != NodeID{2});  // not target
-
-    // Sanity: weight != forward_key(middle) + reverse_key(middle) -- this is
-    // the condition in `search` that triggers the "self loop makes up the full
-    // path" branch, writing packed_leg = [middle, middle].
-    const EdgeWeight forward_key_middle = forward_heap.GetKey(1);
-    const EdgeWeight reverse_key_middle = reverse_heap.GetKey(1);
-    BOOST_CHECK_NE(upper_bound, forward_key_middle + reverse_key_middle);
+    BOOST_CHECK_EQUAL(middle, SPECIAL_NODEID);
+    BOOST_CHECK_EQUAL(upper_bound, INVALID_EDGE_WEIGHT);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// ---------------------------------------------------------------------------
+// Case-1 regression: same-segment force-loop.
+//
+// The Spec 3 fix removes the `new_weight < 0` fallback from routingStep's
+// self-loop branch.  The legitimate use case the fallback was incidentally
+// covering is "source and target on the same segment, source-behind-target":
+// the route has to drive past the destination, loop around, and come back.
+// callers must now explicitly populate force_loop_*_nodes for this case
+// (directShortestPathSearch and getNetworkDistance do so via
+// getForwardLoopNodes / requiresForwardLoop).
+//
+// These tests assert routingStep still picks the self-loop at the shared
+// segment node when force_loop_forward_nodes contains that node, and that
+// without the signal the algorithm no longer locks onto an unrelated self-
+// loop (the INC-296 case-2 path).
+
+BOOST_AUTO_TEST_SUITE(routing_base_ch_search_case1_force_loop)
+
+namespace
+{
+using EdgeData = osrm::contractor::QueryEdge::EdgeData;
+
+// One node with a self-loop edge representing the U-turn cost at the shared
+// segment.  Source and target are both inserted at this node.
+class SameSegmentUTurnFacade
+{
+  public:
+    SameSegmentUTurnFacade()
+    {
+        edges_.push_back({/*source=*/0, /*target=*/0,
+                          EdgeData{/*turn_id=*/0,
+                                   /*shortcut=*/false,
+                                   /*weight=*/1000,
+                                   /*duration=*/1000,
+                                   /*distance=*/1.0f,
+                                   /*forward=*/true,
+                                   /*backward=*/true}});
+        adjacency_[0] = {0};
+    }
+
+    unsigned GetNumberOfNodes() const { return 1; }
+    unsigned GetNumberOfEdges() const { return static_cast<unsigned>(edges_.size()); }
+
+    const std::vector<EdgeID> &GetAdjacentEdgeRange(NodeID node) const
+    {
+        auto it = adjacency_.find(node);
+        if (it == adjacency_.end())
+        {
+            static const std::vector<EdgeID> empty;
+            return empty;
+        }
+        return it->second;
+    }
+
+    const EdgeData &GetEdgeData(EdgeID edge_id) const { return edges_.at(edge_id).data; }
+    NodeID GetTarget(EdgeID edge_id) const { return edges_.at(edge_id).target; }
+
+  private:
+    struct MinimalEdge
+    {
+        NodeID source;
+        NodeID target;
+        EdgeData data;
+    };
+    std::vector<MinimalEdge> edges_;
+    std::unordered_map<NodeID, std::vector<EdgeID>> adjacency_;
+};
+} // namespace
+
+// With the force-loop signal set, the algorithm picks the self-loop at the
+// shared node and produces a U-turn answer.  This is what directShortestPathSearch
+// and getNetworkDistance now drive into routingStep after the Spec 3 caller fix.
+BOOST_AUTO_TEST_CASE(routingStep_picks_self_loop_when_force_loop_forward_signal_set)
+{
+    using namespace osrm;
+    using namespace osrm::engine;
+    using namespace osrm::engine::routing_algorithms;
+
+    SameSegmentUTurnFacade facade;
+
+    using QueryHeap = SearchEngineData<ch::Algorithm>::QueryHeap;
+    QueryHeap forward_heap{1};
+    QueryHeap reverse_heap{1};
+
+    // Source and target both on segment 0; source-behind-target means the
+    // source phantom's forward weight offset > target's, so forward_heap's
+    // key for node 0 is more negative than reverse_heap's.
+    forward_heap.Insert(/*node=*/0, /*weight=*/-700, /*data=*/HeapData{0});
+    reverse_heap.Insert(/*node=*/0, /*weight=*/0, /*data=*/HeapData{0});
+
+    NodeID middle = SPECIAL_NODEID;
+    EdgeWeight upper_bound = INVALID_EDGE_WEIGHT;
+    const EdgeWeight min_edge_offset = std::min(EdgeWeight{0}, forward_heap.MinKey());
+
+    // The caller (directShortestPathSearch / getNetworkDistance) has determined
+    // source and target are on the same forward segment and require a forward
+    // loop: force_loop_forward = {segment_node_id}.
+    const std::vector<NodeID> force_loop_forward{0};
+    const std::vector<NodeID> no_force_loop;
+
+    // Pop node 0 (parent==0).  force_loop returns true.  Self-loop branch
+    // finds the self-loop edge with weight 1000.  loop_weight = -700 + 1000 = 300.
+    // middle = 0, upper_bound = 300.
+    ch::routingStep<FORWARD_DIRECTION, ch::DISABLE_STALLING>(
+        facade, forward_heap, reverse_heap, middle, upper_bound, min_edge_offset,
+        force_loop_forward, no_force_loop);
+
+    BOOST_CHECK_EQUAL(middle, NodeID{0});
+    BOOST_CHECK_EQUAL(upper_bound, 300);
+}
+
+// Counter-test: same scenario WITHOUT the force-loop signal.  Pre-fix, the
+// `new_weight < 0` fallback would have entered the self-loop branch anyway
+// and produced the same answer.  Post-fix, the algorithm correctly does not
+// lock onto the self-loop -- proving the fallback is gone, and demonstrating
+// why the caller fix (#2 in Spec 3) is required for case 1.
+BOOST_AUTO_TEST_CASE(routingStep_does_not_pick_self_loop_without_force_loop_signal)
+{
+    using namespace osrm;
+    using namespace osrm::engine;
+    using namespace osrm::engine::routing_algorithms;
+
+    SameSegmentUTurnFacade facade;
+
+    using QueryHeap = SearchEngineData<ch::Algorithm>::QueryHeap;
+    QueryHeap forward_heap{1};
+    QueryHeap reverse_heap{1};
+
+    forward_heap.Insert(/*node=*/0, /*weight=*/-700, /*data=*/HeapData{0});
+    reverse_heap.Insert(/*node=*/0, /*weight=*/0, /*data=*/HeapData{0});
+
+    NodeID middle = SPECIAL_NODEID;
+    EdgeWeight upper_bound = INVALID_EDGE_WEIGHT;
+    const EdgeWeight min_edge_offset = std::min(EdgeWeight{0}, forward_heap.MinKey());
+
+    const std::vector<NodeID> no_force_loop;
+
+    ch::routingStep<FORWARD_DIRECTION, ch::DISABLE_STALLING>(
+        facade, forward_heap, reverse_heap, middle, upper_bound, min_edge_offset,
+        no_force_loop, no_force_loop);
+
+    BOOST_CHECK_EQUAL(middle, SPECIAL_NODEID);
+    BOOST_CHECK_EQUAL(upper_bound, INVALID_EDGE_WEIGHT);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// Note: requiresForwardLoop / requiresBackwardLoop are exercised end-to-end by
+// the engine + cucumber integration tests via getForwardLoopNodes /
+// getBackwardLoopNodes (which call them).  Targeted unit tests here are
+// awkward because PhantomNode's is_valid_*_source/target bitfields are
+// private and only settable through the heavy public constructor.  The Layer 2
+// regression diff against real prod geographies is where these predicates'
+// post-fix behaviour gets the most meaningful coverage.
