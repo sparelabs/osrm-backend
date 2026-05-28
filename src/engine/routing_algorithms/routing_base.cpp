@@ -1,5 +1,7 @@
 #include "engine/routing_algorithms/routing_base.hpp"
 
+#include "util/exception.hpp"
+
 namespace osrm
 {
 namespace engine
@@ -94,7 +96,11 @@ PhantomEndpoints endpointsFromCandidates(const PhantomEndpointCandidates &candid
                                       return path.front() == source_phantom.forward_segment_id.id ||
                                              path.front() == source_phantom.reverse_segment_id.id;
                                   });
-    BOOST_ASSERT(source_it != candidates.source_phantoms.end());
+    if (source_it == candidates.source_phantoms.end())
+    {
+        throw util::exception(
+            "Route start node matches no source phantom candidate - graph data is likely corrupt");
+    }
 
     auto target_it = std::find_if(candidates.target_phantoms.begin(),
                                   candidates.target_phantoms.end(),
@@ -102,7 +108,11 @@ PhantomEndpoints endpointsFromCandidates(const PhantomEndpointCandidates &candid
                                       return path.back() == target_phantom.forward_segment_id.id ||
                                              path.back() == target_phantom.reverse_segment_id.id;
                                   });
-    BOOST_ASSERT(target_it != candidates.target_phantoms.end());
+    if (target_it == candidates.target_phantoms.end())
+    {
+        throw util::exception(
+            "Route end node matches no target phantom candidate - graph data is likely corrupt");
+    }
 
     return PhantomEndpoints{*source_it, *target_it};
 }

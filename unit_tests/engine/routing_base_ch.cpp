@@ -122,7 +122,7 @@ BOOST_AUTO_TEST_SUITE_END()
 //
 // This regression suite locks down the failure mode at the endpointsFromCandidates
 // boundary: when the path doesn't match the candidates, we get a *catchable*
-// util::exception (via BOOST_ENABLE_ASSERT_HANDLER), not undefined behavior.
+// util::exception (thrown explicitly from endpointsFromCandidates), not undefined behavior.
 //
 // See INC-296 for full investigation.
 
