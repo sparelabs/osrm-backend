@@ -31,14 +31,17 @@ InternalRouteResult directShortestPathSearch(SearchEngineData<ch::Algorithm> &en
     std::vector<NodeID> packed_leg;
     insertNodesInHeaps(forward_heap, reverse_heap, endpoint_candidates);
 
+    const auto force_loop_forward = getForwardLoopNodes(endpoint_candidates);
+    const auto force_loop_reverse = getBackwardLoopNodes(endpoint_candidates);
+
     search(engine_working_data,
            facade,
            forward_heap,
            reverse_heap,
            weight,
            packed_leg,
-           {},
-           {},
+           force_loop_forward,
+           force_loop_reverse,
            endpoint_candidates);
 
     std::vector<NodeID> unpacked_nodes;

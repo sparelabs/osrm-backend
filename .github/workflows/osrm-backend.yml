@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - master
+      - 5.27.1
     tags:
       - v[1-9]+.[0-9]+.[0-9]+
       - v[1-9]+.[0-9]+.[0-9]+-[a-zA-Z]+.[0-9]+
@@ -10,6 +11,7 @@ on:
   pull_request:
     branches:
       - master
+      - 5.27.1
 
 env:
   CCACHE_TEMPDIR: /tmp/.ccache-temp

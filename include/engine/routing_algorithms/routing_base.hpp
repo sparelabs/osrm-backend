@@ -76,6 +76,11 @@ void insertTargetInReverseHeap(Heap &reverse_heap, const PhantomNode &target)
 static constexpr bool FORWARD_DIRECTION = true;
 static constexpr bool REVERSE_DIRECTION = false;
 
+// Predicates for whether a single source/target phantom pair requires a forced
+// loop in the forward or reverse search direction (same segment, source-behind-target).
+bool requiresForwardLoop(const PhantomNode &source, const PhantomNode &target);
+bool requiresBackwardLoop(const PhantomNode &source, const PhantomNode &target);
+
 // Identify nodes in the forward(reverse) search direction that will require loop forcing
 // e.g. if source and destination nodes are on the same segment.
 std::vector<NodeID> getForwardLoopNodes(const PhantomEndpointCandidates &candidates);

@@ -6,6 +6,7 @@
 #include "engine/routing_algorithms/routing_base.hpp"
 #include "engine/search_engine_data.hpp"
 
+#include "util/exception.hpp"
 #include "util/typedefs.hpp"
 
 #include <boost/assert.hpp>
@@ -22,8 +23,13 @@ namespace ch
 {
 
 // Stalling
-template <bool DIRECTION, typename HeapT>
-bool stallAtNode(const DataFacade<Algorithm> &facade,
+//
+// Templated on FacadeT to enable unit testing with a custom mock facade
+// (see INC-296 V5: unit_tests/engine/routing_base_ch.cpp).  All production
+// callsites pass DataFacade<ch::Algorithm> so type deduction keeps behaviour
+// unchanged.
+template <bool DIRECTION, typename FacadeT, typename HeapT>
+bool stallAtNode(const FacadeT &facade,
                  const typename HeapT::HeapNode &heapNode,
                  const HeapT &query_heap)
 {
@@ -48,8 +54,9 @@ bool stallAtNode(const DataFacade<Algorithm> &facade,
     return false;
 }
 
-template <bool DIRECTION>
-void relaxOutgoingEdges(const DataFacade<Algorithm> &facade,
+// Templated on FacadeT (see INC-296 V5 comment on stallAtNode).
+template <bool DIRECTION, typename FacadeT>
+void relaxOutgoingEdges(const FacadeT &facade,
                         const SearchEngineData<Algorithm>::QueryHeap::HeapNode &heapNode,
                         SearchEngineData<Algorithm>::QueryHeap &heap)
 {
@@ -113,8 +120,9 @@ we need to add an offset to the termination criterion.
 */
 static constexpr bool ENABLE_STALLING = true;
 static constexpr bool DISABLE_STALLING = false;
-template <bool DIRECTION, bool STALLING = ENABLE_STALLING>
-void routingStep(const DataFacade<Algorithm> &facade,
+// Templated on FacadeT (see INC-296 V5 comment on stallAtNode).
+template <bool DIRECTION, bool STALLING = ENABLE_STALLING, typename FacadeT>
+void routingStep(const FacadeT &facade,
                  SearchEngineData<Algorithm>::QueryHeap &forward_heap,
                  SearchEngineData<Algorithm>::QueryHeap &reverse_heap,
                  NodeID &middle_node_id,
@@ -132,10 +140,7 @@ void routingStep(const DataFacade<Algorithm> &facade,
         if (new_weight < upper_bound)
         {
             if (force_loop(force_loop_forward_nodes, heapNode) ||
-                force_loop(force_loop_reverse_nodes, heapNode) ||
-                // in this case we are looking at a bi-directional way where the source
-                // and target phantom are on the same edge based node
-                new_weight < 0)
+                force_loop(force_loop_reverse_nodes, heapNode))
             {
                 // check whether there is a loop present at the node
                 for (const auto edge : facade.GetAdjacentEdgeRange(heapNode.node))
@@ -157,10 +162,10 @@ void routingStep(const DataFacade<Algorithm> &facade,
                     }
                 }
             }
-            else
+            else if (new_weight >= 0)
             {
-                BOOST_ASSERT(new_weight >= 0);
-
+                // Negative new_weight without a force-loop signal means a heap
+                // offset hasn't paid down yet; skip and keep exploring.
                 middle_node_id = heapNode.node;
                 upper_bound = new_weight;
             }
@@ -185,8 +190,9 @@ void routingStep(const DataFacade<Algorithm> &facade,
     relaxOutgoingEdges<DIRECTION>(facade, heapNode, forward_heap);
 }
 
-template <bool UseDuration>
-std::tuple<EdgeWeight, EdgeDistance> getLoopWeight(const DataFacade<Algorithm> &facade, NodeID node)
+// Templated on FacadeT (see INC-296 V5 comment on stallAtNode).
+template <bool UseDuration, typename FacadeT>
+std::tuple<EdgeWeight, EdgeDistance> getLoopWeight(const FacadeT &facade, NodeID node)
 {
     EdgeWeight loop_weight = UseDuration ? MAXIMAL_EDGE_DURATION : INVALID_EDGE_WEIGHT;
     EdgeDistance loop_distance = MAXIMAL_EDGE_DISTANCE;
@@ -230,8 +236,12 @@ std::tuple<EdgeWeight, EdgeDistance> getLoopWeight(const DataFacade<Algorithm> &
  * @param callback void(const std::pair<NodeID, NodeID>, const EdgeID &) called for each
  * original edge found.
  */
-template <typename BidirectionalIterator, typename Callback>
-void unpackPath(const DataFacade<Algorithm> &facade,
+// Templated on FacadeT (rather than DataFacade<Algorithm> concretely) to mirror
+// MLD's unpackPath in routing_base_mld.hpp and to enable unit-testing with the
+// MockDataFacade<CH>.  All existing production callsites pass DataFacade<ch::Algorithm>
+// so behaviour is unchanged.
+template <typename FacadeT, typename BidirectionalIterator, typename Callback>
+void unpackPath(const FacadeT &facade,
                 BidirectionalIterator packed_path_begin,
                 BidirectionalIterator packed_path_end,
                 Callback &&callback)
@@ -255,6 +265,21 @@ void unpackPath(const DataFacade<Algorithm> &facade,
         edge = recursion_stack.top();
         recursion_stack.pop();
 
+        // Validate node IDs are in range before passing to FindSmallestEdge.
+        // A corrupt CH graph (INC-296) can produce a shortcut whose middle node
+        // ID is past the end of the node table; the shortcut gets pushed back
+        // onto the recursion stack as the `from` of the next iteration, and
+        // FindSmallestEdge then dereferences node arrays with a garbage index
+        // and segfaults.  Catching this here turns the crash into a JS-side
+        // error via the engine's exception path.
+        const auto num_nodes_for_check = facade.GetNumberOfNodes();
+        if ((edge.first != SPECIAL_NODEID && edge.first >= num_nodes_for_check) ||
+            (edge.second != SPECIAL_NODEID && edge.second >= num_nodes_for_check))
+        {
+            throw util::exception(
+                "Invalid node ID in CH packed path - graph data is likely corrupt");
+        }
+
         // Look for an edge on the forward CH graph (.forward)
         EdgeID smaller_edge_id = facade.FindSmallestEdge(
             edge.first, edge.second, [](const auto &data) { return data.forward; });
@@ -268,13 +293,31 @@ void unpackPath(const DataFacade<Algorithm> &facade,
                 edge.second, edge.first, [](const auto &data) { return data.backward; });
         }
 
-        // If we didn't find anything *still*, then something is broken and someone has
-        // called this function with bad values.
-        BOOST_ASSERT_MSG(smaller_edge_id != SPECIAL_EDGEID, "Invalid smaller edge ID");
+        // If we didn't find anything *still*, the CH graph data is corrupt or the
+        // packed path references an edge that doesn't exist.  Throw rather than
+        // dereferencing an out-of-range edge ID via GetEdgeData below: that
+        // would index EdgeData with garbage (SPECIAL_EDGEID, or just any value
+        // past the end of the edge table) and segfault the process in release
+        // builds where BOOST_ASSERT_MSG is compiled out.  The exception
+        // propagates up through engine code to the Node binding's per-request
+        // catch (node_osrm.cpp), where it becomes a JS-side error.
+        //
+        // Note: the bound-check is broader than `== SPECIAL_EDGEID` because a
+        // corrupted graph (INC-296) can produce a packed-path edge whose
+        // FindSmallestEdge result is a real-looking but out-of-range index,
+        // not the sentinel.  Comparing >= GetNumberOfEdges() catches both.
+        if (smaller_edge_id == SPECIAL_EDGEID || smaller_edge_id >= facade.GetNumberOfEdges())
+        {
+            throw util::exception(
+                "Invalid edge ID encountered during CH path unpacking - graph data is likely corrupt");
+        }
 
         const auto &data = facade.GetEdgeData(smaller_edge_id);
-        BOOST_ASSERT_MSG(data.weight != std::numeric_limits<EdgeWeight>::max(),
-                         "edge weight invalid");
+        if (data.weight == std::numeric_limits<EdgeWeight>::max())
+        {
+            throw util::exception(
+                "Invalid edge weight encountered during CH path unpacking - graph data is likely corrupt");
+        }
 
         // If the edge is a shortcut, we need to add the two halfs to the stack.
         if (data.shortcut)
@@ -342,13 +385,21 @@ EdgeDistance calculateEBGNodeAnnotations(const DataFacade<Algorithm> &facade,
                                             [](const auto &data) { return data.backward; });
             }
 
-            // If we didn't find anything *still*, then something is broken and someone has
-            // called this function with bad values.
-            BOOST_ASSERT_MSG(smaller_edge_id != SPECIAL_EDGEID, "Invalid smaller edge ID");
+            // If we didn't find anything *still*, the CH graph is corrupt.  Throw
+            // rather than dereferencing an out-of-range edge ID via GetEdgeData
+            // (see the companion check in unpackPath above for the same rationale).
+            if (smaller_edge_id == SPECIAL_EDGEID || smaller_edge_id >= facade.GetNumberOfEdges())
+            {
+                throw util::exception(
+                    "Invalid edge ID encountered during CH EBG node annotation - graph data is likely corrupt");
+            }
 
             const auto &data = facade.GetEdgeData(smaller_edge_id);
-            BOOST_ASSERT_MSG(data.weight != std::numeric_limits<EdgeWeight>::max(),
-                             "edge weight invalid");
+            if (data.weight == std::numeric_limits<EdgeWeight>::max())
+            {
+                throw util::exception(
+                    "Invalid edge weight encountered during CH EBG node annotation - graph data is likely corrupt");
+            }
 
             // If the edge is a shortcut, we need to add the two halfs to the stack.
             if (data.shortcut)
